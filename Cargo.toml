@@ -1,6 +1,26 @@
 [package]
-name = "search-rl"
+name = "search_rl"
 version = "0.1.0"
 edition = "2021"
+description = "Reinforcement learning search optimization"
+license = "MIT"
+keywords = ["rl", "ml", "machine-learning", "ai", "search"]
+categories = ["science"]
+repository = "https://github.com/gsidebottom/search-rl"
+rust-version = "1.84.0 "
 
 [dependencies]
+burn = "0"
+rl = "0.4"
+strum = "0.26"
+strum_macros = "0.26"
+itertools = "0.14"
+rand = "0.9"
+clap = { version = "4.5.29", features = ["derive"] }
+smallvec = "1"
+
+[[example]]
+name = "tangled"
+
+[[example]]
+name = "hex"
