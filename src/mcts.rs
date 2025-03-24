@@ -1,80 +1,134 @@
 use crate::env::{Action, ActionMap, State};
+use itertools::Itertools;
+use ordered_float::OrderedFloat;
 use rand::random_range;
 use smallvec::Array;
 use std::cell::OnceCell;
 use std::default::Default;
 use std::ops::{Index, IndexMut};
-use itertools::Itertools;
 
 #[derive(Debug, Clone, Copy)]
-pub struct NodeRef(usize);
+pub struct NodeRef<const N: usize>(usize);
 
-impl NodeRef {
+impl<const N: usize> NodeRef<N> {
     fn index(&self) -> usize {
         self.0
     }
 }
 
-#[derive(Default)]
-pub struct Nodes<const N: usize, S: State>(Vec<Node<N, S>>);
+unsafe impl<const N: usize> Array for NodeRef<N> {
+    type Item = NodeRef<N>;
 
-impl<const N: usize, S: State> Nodes<N, S> {
-    pub fn new() -> (NodeRef, Self) {
+    fn size() -> usize {
+        N
+    }
+}
+
+pub struct F32<const A: usize>(pub f32);
+
+unsafe impl<const N: usize> Array for F32<N> {
+    type Item = F32<N>;
+
+    fn size() -> usize {
+        N
+    }
+}
+
+#[derive(Default)]
+pub struct Nodes<
+    const N: usize,
+    const D: usize,
+    S: State<D>,
+>(Vec<Node<N, D, S>>);
+
+impl<
+    const N: usize,
+    const D: usize,
+    S: State<D>,
+> Nodes<N, D, S> {
+    pub fn new() -> (NodeRef<N>, Self) {
         let mut nodes = Self(Vec::new());
         let root_ref = nodes.add_node(S::init());
         (root_ref, nodes)
     }
 
     /// select an action taking to child node/state
-    pub fn select_action(&mut self, node_ref: NodeRef) -> (Action, NodeRef) {
-        // lazily create takes and children/states
-        if !self[node_ref].has_takes() {
-            self.add_takes(node_ref);
-            self.add_children(node_ref)
-        }
-        self[node_ref].select_action()
+    pub fn select_action(&mut self, node_ref: NodeRef<N>) -> (Action, NodeRef<N>) {
+        self.open_if_not(node_ref);
+        self[node_ref].select_action(3.0)
     }
 
-    fn add_node(&mut self, state: S) -> NodeRef {
+    pub fn sample_action(
+        &mut self,
+        node_ref: NodeRef<N>,
+        temperature: f32,
+    ) -> (Action, NodeRef<N>) {
+        self.open_if_not(node_ref);
+        self[node_ref].sample_action(temperature)
+    }
+
+    fn add_node(&mut self, state: S) -> NodeRef<N> {
         let index = self.0.len();
         self.0.push(Node::new(state));
         NodeRef(index)
     }
 
-    fn add_takes(&self, node_ref: NodeRef) {
-        let mut last_node_ref = self.0.len()-1;
-        self[node_ref].add_takes(|| { last_node_ref += 1; NodeRef(last_node_ref) });
+    fn is_open(&self, node_ref: NodeRef<N>) -> bool {
+        self[node_ref].has_actions()
     }
 
-    fn add_children(&mut self, node_ref: NodeRef) {
+    fn open_if_not(&mut self, node_ref: NodeRef<N>) {
+        if self.is_open(node_ref) {
+            return;
+        }
+        self.init_actions(node_ref);
+        self.add_children(node_ref)
+    }
+
+    fn init_actions(&self, node_ref: NodeRef<N>) {
+        let mut last_node_ref = self.0.len() - 1;
+        self[node_ref].init_actions(|| {
+            last_node_ref += 1;
+            NodeRef(last_node_ref)
+        })
+    }
+
+    fn add_children(&mut self, node_ref: NodeRef<N>) {
         let state = &self[node_ref].state;
-        let child_states = state.action_iter().map(|action| state.take(action)).collect_vec();
+        let child_states = state
+            .action_iter()
+            .map(|action| state.take(action))
+            .collect_vec();
         child_states.into_iter().for_each(|child_state| {
             _ = self.add_node(child_state);
         })
     }
 }
 
-impl<const N: usize, S: State> Index<NodeRef> for Nodes<N, S> {
-    type Output = Node<N, S>;
+impl<
+    const N: usize,
+    const D: usize,
+    S: State<D>,
+> Index<NodeRef<N>> for Nodes<N, D, S> {
+    type Output = Node<N, D, S>;
 
-    fn index(&self, index: NodeRef) -> &Self::Output {
+    fn index(&self, index: NodeRef<N>) -> &Self::Output {
         &self.0[index.index()]
     }
 }
 
-impl<const N: usize, S: State> IndexMut<NodeRef> for Nodes<N, S> {
-    fn index_mut(&mut self, index: NodeRef) -> &mut Self::Output {
+impl<
+    const N: usize,
+    const D: usize,
+    S: State<D>,
+> IndexMut<NodeRef<N>> for Nodes<N, D, S> {
+    fn index_mut(&mut self, index: NodeRef<N>) -> &mut Self::Output {
         &mut self.0[index.index()]
     }
 }
 
 /// result of taking an action
-pub struct Take<const N: usize> {
-    /// the action taken
-    action: Action,
-    /// the child node in the search tree resulting from taking the action
-    child_ref: NodeRef,
+pub struct Stats<const A: usize> {
     /// N(s, a): The number of times action a has been taken from state s
     count: usize,
     /// W(s, a): The total summed value V obtained from every time we’ve taken action a from
@@ -87,36 +141,69 @@ pub struct Take<const N: usize> {
     prior: f32,
 }
 
-impl<const N: usize> Take<N> {
+impl<const A: usize> ActionMap<Stats<A>> {
+    pub fn probability_iter(
+        &self,
+        visit_count: usize,
+        temperature: f32,
+    ) -> impl Iterator<Item = F32<A>> + '_ {
+        let denom = (visit_count as f32).powf(1.0 / temperature);
+        self.iter()
+            .map(move |stats| F32((stats.count as f32).powf(1.0 / temperature) / denom))
+    }
+
+    pub fn quality(&self) -> f32 {
+        self.iter().map(|stats| stats.quality()).sum::<f32>() / self.len() as f32
+    }
+
+}
+
+impl<const A: usize> Stats<A> {
     /// Q(s, a): The mean value V obtained from taking action a from state s, equal to W(s, a) / N(s, a)
     pub fn quality(&self) -> f32 {
         self.total_value / self.count as f32
     }
-}
 
-unsafe impl<const N: usize> Array for Take<N> {
-    type Item = Take<N>;
-
-    fn size() -> usize {
-        N
+    /// PUCT(s, a) = Q(s, a) + c * P(s, a) * sqrt(N(s))/(1 + N(s, a))
+    pub fn puct(&self, visit_count: usize, explore_factor: f32) -> f32 {
+        self.quality()
+            + explore_factor * self.prior * (visit_count as f32).sqrt() / (1.0 + self.count as f32)
     }
 }
 
-pub struct Node<const N: usize, S: State> {
+unsafe impl<const A: usize> Array for Stats<A> {
+    type Item = Stats<A>;
+
+    fn size() -> usize {
+        A
+    }
+}
+
+pub struct Node<
+    const N: usize,
+    const D: usize,
+    S: State<D>,
+> {
     state: S,
     /// N(s): The number of times state s has been visited
     visit_count: usize,
     reward: OnceCell<Option<f32>>,
-    takes: OnceCell<ActionMap<Take<N>>>,
+    actions: OnceCell<ActionMap<NodeRef<N>>>,
+    action_stats: OnceCell<ActionMap<Stats<N>>>,
 }
 
-impl<const N: usize, S: State> Node<N, S> {
+impl<
+    const N: usize,
+    const D: usize,
+    S: State<D>,
+> Node<N, D, S> {
     pub fn new(state: S) -> Self {
         Self {
             state,
             visit_count: 0,
             reward: OnceCell::new(),
-            takes: OnceCell::new(),
+            actions: OnceCell::new(),
+            action_stats: OnceCell::new(),
         }
     }
 
@@ -130,82 +217,120 @@ impl<const N: usize, S: State> Node<N, S> {
         self.reward.get_or_init(|| self.state.reward())
     }
 
-    pub fn has_takes(&self) -> bool {
-        self.takes.get().is_some()
+    pub fn has_actions(&self) -> bool {
+        self.action_stats.get().is_some()
     }
 
-    /// add the takes
-    pub fn add_takes(&self, mut new_node_ref: impl FnMut() -> NodeRef) {
-        self.takes.get_or_init(|| {
+    /// initialize the actions
+    pub fn init_actions(&self, mut new_node_ref: impl FnMut() -> NodeRef<N>) {
+        self.actions.get_or_init(|| {
             let prior = 1.0 / self.state.action_count() as f32;
-            let action_result_iter = self.state.action_iter().map(|a| {
-                let child_ref = new_node_ref();
-                Take {
-                    action: a,
-                    child_ref,
-                    count: 0,
-                    total_value: 0.0,
-                    prior,
-                }
-            });
-            ActionMap::new(action_result_iter)
+            let (child_refs, stats): (Vec<_>, Vec<_>) = self
+                .state
+                .action_iter()
+                .map(|_action| {
+                    (
+                        new_node_ref(),
+                        Stats {
+                            count: 0,
+                            total_value: 0.0,
+                            prior,
+                        },
+                    )
+                })
+                .unzip();
+            self.action_stats.get_or_init(|| ActionMap::new(stats));
+            ActionMap::new(child_refs)
         });
     }
 
-    /// get the action takes
-    fn takes(&self) -> &ActionMap<Take<N>> {
-        self.takes.get().expect("action takes should be created")
+    /// get the actions
+    fn actions(&self) -> &ActionMap<NodeRef<N>> {
+        self.actions.get().expect("actions should be initialized")
+    }
+
+    /// get the action stats
+    fn action_stats(&self) -> &ActionMap<Stats<N>> {
+        self.action_stats
+            .get()
+            .expect("action stats should be created")
     }
 
     /// select the action to take
-    pub fn select_action(&self) -> (Action, NodeRef) {
-        let r: f32 = random_range(0.0..=1.0);
-        self.takes()
-            .iter()
-            .scan(
-                0.0,
-                |cumulative,
-                 Take {
-                     action,
-                     child_ref,
-                     prior,
-                     ..
-                 }| {
-                    *cumulative += *prior;
-                    (*cumulative <= r).then_some((*action, *child_ref))
-                },
-            )
-            .last()
+    pub fn select_action(&self, explore_factor: f32) -> (Action, NodeRef<N>) {
+        let (action, _) = self
+            .action_stats()
+            .action_value_iter()
+            .map(|(action, stats)| (action, stats.puct(self.visit_count(), explore_factor)))
+            .max_by_key(|(_, puct)| OrderedFloat(*puct))
+            .expect("at least one action");
+        (action, self.actions()[action])
+    }
+
+    /// pi_s(a) is probability that action `a` is taken from state `s`
+    pub fn action_probability(&self, temperature: f32) -> ActionMap<F32<N>> {
+        ActionMap::new(self.action_stats().probability_iter(self.visit_count(), temperature))
+    }
+
+    /// sample action
+    pub fn sample_action(&self, temperature: f32) -> (Action, NodeRef<N>) {
+        let r = random_range(0.0f32..1.0);
+        let mut p = 0.0;
+        let action = self
+            .action_probability(temperature)
+            .action_value_iter()
+            .find_or_last(|(_action, prob)| {
+                p += prob.0;
+                p >= r
+            })
             .expect("at least one action")
+            .0;
+        (action, self.actions()[action])
+    }
+
+    /// mean quality of state
+    pub fn quality(&self) -> f32 {
+        self.action_stats().quality()
     }
 }
 
-pub struct Tree<const N: usize, S: State> {
-    root_ref: NodeRef,
-    nodes: Nodes<N, S>,
+pub struct Tree<
+    const N: usize,
+    const D: usize,
+    S: State<D>,
+> {
+    root_ref: NodeRef<N>,
+    nodes: Nodes<N, D, S>,
 }
 
-impl<const N: usize, S: State> Default for Tree<N, S> {
+impl<
+    const N: usize,
+    const D: usize,
+    S: State<D>,
+> Default for Tree<N, D, S> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<const N: usize, S: State> Tree<N, S> {
+impl<
+    const N: usize,
+    const D: usize,
+    S: State<D>,
+> Tree<N, D, S> {
     pub fn new() -> Self {
-        let (root_ref, nodes) = Nodes::new();
+        let (root_ref, nodes) = Nodes::<N, D, S>::new();
         Self { root_ref, nodes }
     }
 
-    pub fn simulate(&mut self, count: usize) {
+    pub fn simulate(&mut self, node_ref: NodeRef<N>, count: usize) {
         let mut back = Vec::with_capacity(128);
         for _ in 0..count {
-            let mut curr_ref = self.root_ref;
-            while self.nodes[curr_ref].visit_count() > 0
-                && self.nodes[curr_ref].reward().is_none()
+            let mut curr_ref = node_ref;
+            while self.nodes[curr_ref].visit_count() > 0 && self.nodes[curr_ref].reward().is_none()
             {
-                let (taken, new_curr_ref) = self.nodes.select_action(curr_ref);
-                back.push((curr_ref, taken));
+                let (action, new_curr_ref) = self.nodes.select_action(curr_ref);
+                back.push((curr_ref, action));
                 curr_ref = new_curr_ref;
             }
             let mut value = match self.nodes[curr_ref].reward() {
@@ -232,17 +357,52 @@ impl<const N: usize, S: State> Tree<N, S> {
             // state-action pair N(s, a) was visited along the path from the root node to the
             // leaf or terminal node; adjust N(s), W(s, a), and Q(s, a) for all the states and
             // actions along this path
-            while let Some((prev_ref, taken)) = back.pop() {
+            while let Some((prev_ref, action)) = back.pop() {
                 let prev = &mut self.nodes[prev_ref];
                 prev.visit_count += 1;
-                value = prev.state.value(taken, value);
-                let prev_action_result = &mut prev
-                    .takes
+                value = prev.state.value(action, value);
+                let prev_action_stats = &mut prev
+                    .action_stats
                     .get_mut()
-                    .expect("action results should be expanded")[taken];
-                prev_action_result.count += 1;
-                prev_action_result.total_value += value
+                    .expect("action results should be expanded")[action];
+                prev_action_stats.count += 1;
+                prev_action_stats.total_value += value
             }
         }
     }
+
+    /// execute sim_count simulations
+    pub fn execute_episode(
+        &mut self,
+        sim_count: usize,
+        temperature: f32
+        /* Neural Net */
+    ) -> impl Iterator<Item = Example<N, D>> + '_ {
+        let mut cur_ref = self.root_ref;
+        let mut back = Vec::new();
+        loop {
+            self.simulate(cur_ref, sim_count);
+            let (action, new_cur_ref) = self.nodes.sample_action(cur_ref, temperature);
+            back.push((cur_ref, action));
+            cur_ref = new_cur_ref;
+            if let Some(reward) = self.nodes[cur_ref].reward() {
+                // stop at terminal state
+                let mut value = *reward;
+                return back.into_iter().map(move |(node_ref, action)| {
+                    let node = &self.nodes[node_ref];
+                    value = node.state.value(action, value);
+                    let state = node.state.as_array();
+                    let pi = node.action_probability(temperature);
+                    Example{state, pi, value}
+                })
+            }
+        }
+    }
+}
+
+/// training example
+pub struct Example<const N: usize, const D: usize, > {
+    pub state: [[i32; D]; D],
+    pub pi: ActionMap<F32<N>>,
+    pub value: f32,
 }

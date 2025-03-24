@@ -1,5 +1,5 @@
-use std::ops::{Index, IndexMut};
 use smallvec::{Array, SmallVec};
+use std::ops::{Index, IndexMut};
 
 /// Action that can be taken from a state
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -11,7 +11,8 @@ impl Action {
     }
 }
 
-pub trait State /*: Clone + Copy*/ {
+/// D is the dimension of the state square D x D
+pub trait State<const D: usize> /*: Clone + Copy*/ {
 
     /// initial state
     fn init() -> Self;
@@ -32,6 +33,9 @@ pub trait State /*: Clone + Copy*/ {
 
     /// value for this state given value for state resulting from taking given action
     fn value(&self, taken: Action, value: f32) -> f32;
+
+    /// float array representation for the state
+    fn as_array(&self) -> [[i32; D]; D];
 }
 
 pub struct ActionMap<T: Array + Sized>(SmallVec<T>);
@@ -43,6 +47,10 @@ impl<T: Array<Item = T> + Sized> ActionMap<T> {
         let mut v = SmallVec::<T>::new();
         v.extend(items);
         Self(v)
+    }
+    
+    pub fn as_slice(&self) -> &[T] {
+        self.0.as_slice()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -59,6 +67,14 @@ impl<T: Array<Item = T> + Sized> ActionMap<T> {
 
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> {
         self.0.iter_mut()
+    }
+    
+    pub fn action_value_iter(&self) -> impl Iterator<Item = (Action, &T)> {
+        self.iter().enumerate().map(|(index, value)| (Action(index), value))
+    }
+
+    pub fn action_value_iter_mut(&mut self) -> impl Iterator<Item = (Action, &mut T)> {
+        self.iter_mut().enumerate().map(|(index, value)| (Action(index), value))
     }
 
     pub fn last(&self) -> Option<&T> {

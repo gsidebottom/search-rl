@@ -2,6 +2,7 @@ use std::default::Default;
 use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
 use std::iter::once;
+use itertools::Itertools;
 use Player::{Blue, Red};
 use search_rl::env::{Action, State};
 
@@ -221,6 +222,21 @@ impl<const N: usize> Board<N> {
             .into_iter()
             .flat_map(|next| next.into_iter())
     }
+
+    pub fn as_array(&self) -> [[i32; N]; N] {
+        self.0
+            .iter()
+            .map(|col| col
+                .iter()
+                .map(|c| match c {
+                    None => 0,
+                    Some(Red) => 1,
+                    Some(Blue) => -1,
+                })
+                .collect_array().unwrap()
+            )
+            .collect_array().unwrap()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -297,7 +313,7 @@ impl<const N: usize> Display for Hex<N> {
     }
 }
 
-impl<const N: usize> State for Hex<N> {
+impl<const N: usize> State<N> for Hex<N> {
     fn init() -> Self {
         Self::default()
     }
@@ -325,5 +341,9 @@ impl<const N: usize> State for Hex<N> {
 
     fn value(&self, _taken: Action, value: f32) -> f32 {
         if value != 0.1 { -value } else { value }
+    }
+
+    fn as_array(&self) -> [[i32; N]; N] {
+        self.board.as_array()
     }
 }
